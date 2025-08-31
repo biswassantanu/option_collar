@@ -1,0 +1,28 @@
+# Byte-compiled / cache
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual environments
+venv/
+env/
+.venv/
+myvenv/
+
+# Distribution / packaging
+build/
+dist/
+*.egg-info/
+
+# Jupyter notebooks checkpoints
+.ipynb_checkpoints
+
+# System files
+.DS_Store
+
+# VSCode / IDE settings
+.vscode/
+.idea/
+
+
+z_col_bkp.py
