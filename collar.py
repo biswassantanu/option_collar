@@ -87,7 +87,10 @@ def compute_rows(
             upside_pct = 100.0 * (kc / price - 1.0)
             dividend_rep = float(dividend_pct)
             up_div_pct = upside_pct + dividend_rep
-            net_band_pct = up_div_pct + eff_down_pct
+            max_profit = upside_pct + net_pct
+            # net_band_pct = up_div_pct + eff_down_pct
+            net_band_pct = max_profit + dividend_rep + eff_down_pct
+
             rows.append({
                 "Ticker": ticker.upper(),
                 "Current Price $": round(price, 2),
@@ -100,7 +103,9 @@ def compute_rows(
                 "Downside %": round(downside_pct, 2),
                 "Effective Downside %": round(eff_down_pct, 2),
                 "Upside %": round(upside_pct, 2),
+                "Max Profit": round(max_profit, 2),                
                 "Dividend %": round(dividend_rep, 2),
+                "Max Profi+Div %": round(max_profit+ dividend_rep, 2),                
                 "Upside + Dividend %": round(up_div_pct, 2),
                 "Net Band %": round(net_band_pct, 2),
             })
@@ -109,7 +114,7 @@ def compute_rows(
         cols = [
             "Ticker","Current Price $","Put","Put $","Call","Call $",
             "Net Premium $","Net Premium %","Downside %","Effective Downside %",
-            "Upside %","Dividend %","Upside + Dividend %","Net Band %",
+            "Upside %","Max Profit","Dividend %","Max Profi+Div %","Upside + Dividend %","Net Band %",
         ]
         df = df[cols].sort_values(["Put", "Call"]).reset_index(drop=True)
     return df
@@ -338,7 +343,9 @@ if run_btn:
             "Downside %": "Floor%",
             "Effective Downside %": "Eff. Floor%",
             "Upside %": "Up%",
+            "Max Profit": "MaxProfit",
             "Dividend %": "Div%",
+            "Max Profi+Div %" : "MaxProfit+Div",
             "Upside + Dividend %": "Up+Div%",
             "Net Band %": "Band%",
         }
@@ -349,7 +356,7 @@ if run_btn:
             "Ticker", "Curr Price$", "Expiry",
             "Put", "Put$", "Call", "Call$",
             "Net Prem$", "Net Prem%", "Floor%", "Eff. Floor%",
-            "Up%", "Div%", "Up+Div%", "Band%",
+            "Up%", "MaxProfit", "Div%", "MaxProfit+Div", "Up+Div%", "Band%",
         ]
         df = df[compact_order]
 
@@ -421,7 +428,8 @@ if "results" in st.session_state:
             min_eff_down = st.number_input("Min Eff. Floor%", value=-3.0, step=0.25)
 
         with f3:
-            min_up_div = st.number_input("Min Up+Div%", value=10.0, step=0.5)
+            # min_up_div = st.number_input("Min Up+Div%", value=10.0, step=0.5)
+            min_eff_profit = st.number_input("Max Profit", value=7.0, step=0.25)
 
         with f4:
             top_n = st.number_input("Top N", min_value=1, max_value=10, value=3, step=1)
@@ -435,7 +443,7 @@ if "results" in st.session_state:
         with r1:
             objective = st.selectbox(
                 "Rank by",
-                ("Max Band%", "Max Up+Div%", "Max Up%", "Max Eff. Floor%"),
+                ("Max Profit", "Max Band%", "Max Up+Div%", "Max Up%", "Max Eff. Floor%"),
                 index=0,
             )
         with r2:
@@ -449,12 +457,13 @@ if "results" in st.session_state:
         fdf = df[
             (df["Net Prem%"].between(net_range[0], net_range[1])) &
             (df["Eff. Floor%"] >= min_eff_down) &
-            (df["Up+Div%"] >= min_up_div)
+            (df["MaxProfit"] >= min_eff_profit)
         ].copy()
 
         # Ranking
         if not fdf.empty:
             primary_map = {
+                "Max Profit": "MaxProfit",
                 "Max Band%": "Band%",
                 "Max Up+Div%": "Up+Div%",
                 "Max Up%": "Up%",
