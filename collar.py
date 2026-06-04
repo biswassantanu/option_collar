@@ -249,17 +249,17 @@ with st.form("inputs_form", clear_on_submit=False):
     c1, c2, c3, c4, c5 = st.columns(5)
     with c1:
         base_ticker = st.text_input("Base Ticker", value="SPY").strip().upper()
-        expiry_input = st.date_input("Expiry Date", value=datetime(2026, 9, 18)).strftime("%Y-%m-%d")
+        put_expiry_input = st.date_input("Put Expiry Date", value=datetime(2027, 6, 20)).strftime("%Y-%m-%d")
     default_price_sym, _ = ALIAS.get(base_ticker, (base_ticker, base_ticker))
     with c2:
         price_symbol = st.text_input("Price Symbol (for price)", value=default_price_sym).strip()
-        strike_step = st.number_input("Strike Step ($)", value=5, step=1)
+        call_expiry_input = st.date_input("Call Expiry Date", value=datetime(2027, 6, 20)).strftime("%Y-%m-%d")
     with c3:
         put_start_pct = st.number_input("Put start (% below ATM)", value=5.0, step=0.5)
         put_end_pct = st.number_input("Put end (% above ATM)", value=5.0, step=0.5)
     with c4:
         call_end_pct = st.number_input("Call end (% above ATM)", value=15.0, step=0.5)
-        st.write("")
+        strike_step = st.number_input("Strike Step ($)", value=5, step=1)
     with c5:
         auto_div = st.checkbox("Auto dividend % (TTM)", value=True)
         manual_div = st.number_input("Manual Dividend %", value=1.10, step=0.05, disabled=auto_div)
@@ -268,7 +268,19 @@ with st.form("inputs_form", clear_on_submit=False):
     with b1:
         if "_build_btn_uid" not in st.session_state:
             st.session_state["_build_btn_uid"] = secrets.token_hex(8)
-        run_btn = st.form_submit_button("Build Table", key=f"build_table_btn_{st.session_state['_build_btn_uid']}")
+        run_btn = st.form_submit_button("Build Table", key=f"build_table_btn_{st.session_state['_build_btn_uid']}", use_container_width=True)
+    st.markdown("""
+    <style>
+      button[kind="secondaryFormSubmit"], button[kind="primaryFormSubmit"],
+      div[data-testid="stFormSubmitButton"] > button {
+        background-color: #E8E8E8 !important;
+        color: #333 !important;
+        border: 1px solid #ccc !important;
+      }
+      div[data-testid="stFormSubmitButton"] > button:hover {
+        background-color: #D0D0D0 !important;
+      }
+    </style>""", unsafe_allow_html=True)
 
 # ========================= Build & Persist Results =========================
 if run_btn:
@@ -296,10 +308,11 @@ if run_btn:
         else:
             div_pct = float(manual_div)
 
-        # Expiry selection
+        # Expiry selection — separate for puts and calls
         t_opt = yf.Ticker(options_symbol)
         all_expiries = t_opt.options or []
-        chosen = pick_expiry_str(all_expiries, expiry_input)
+        chosen_put  = pick_expiry_str(all_expiries, put_expiry_input)
+        chosen_call = pick_expiry_str(all_expiries, call_expiry_input)
 
         # Strike grids
         step = int(strike_step)
@@ -310,28 +323,59 @@ if run_btn:
         desired_puts  = list(range(put_start, put_end + step, step))
         desired_calls = list(range(atm, call_end + step, step))
 
-        # Chains + quotes (mid, fallback last)
-        chain = t_opt.option_chain(chosen)
-        calls_df, puts_df = chain.calls, chain.puts
-        calls_df["mid"] = (calls_df["bid"].fillna(0) + calls_df["ask"].fillna(0)).replace(0, np.nan) / 2
-        puts_df["mid"]  = (puts_df["bid"].fillna(0) + puts_df["ask"].fillna(0)).replace(0, np.nan) / 2
-        calls_df["q"]   = calls_df["mid"].fillna(calls_df["lastPrice"]).astype(float)
-        puts_df["q"]    = puts_df["mid"].fillna(puts_df["lastPrice"]).astype(float)
-
-        # Round to our strike grid (prevents “only first put” bug)
-        calls_df["strike_key"] = calls_df["strike"].apply(lambda s: round_to_strike(s, step)).astype(int)
-        puts_df["strike_key"]  = puts_df["strike"].apply(lambda s: round_to_strike(s, step)).astype(int)
-        call_map = calls_df.drop_duplicates("strike_key").set_index("strike_key")["q"].to_dict()
+        # Put chain
+        put_chain  = t_opt.option_chain(chosen_put)
+        puts_df    = put_chain.puts.copy()
+        puts_df["mid"] = (puts_df["bid"].fillna(0) + puts_df["ask"].fillna(0)).replace(0, np.nan) / 2
+        puts_df["q"]   = puts_df["mid"].fillna(puts_df["lastPrice"]).astype(float)
+        puts_df["strike_key"] = puts_df["strike"].apply(lambda s: round_to_strike(s, step)).astype(int)
         put_map  = puts_df.drop_duplicates("strike_key").set_index("strike_key")["q"].to_dict()
+
+        # Call chain (may differ from put expiry)
+        call_chain = t_opt.option_chain(chosen_call)
+        calls_df   = call_chain.calls.copy()
+        calls_df["mid"] = (calls_df["bid"].fillna(0) + calls_df["ask"].fillna(0)).replace(0, np.nan) / 2
+        calls_df["q"]   = calls_df["mid"].fillna(calls_df["lastPrice"]).astype(float)
+        calls_df["strike_key"] = calls_df["strike"].apply(lambda s: round_to_strike(s, step)).astype(int)
+        call_map = calls_df.drop_duplicates("strike_key").set_index("strike_key")["q"].to_dict()
 
         call_quotes = {k: float(call_map.get(k, np.nan)) for k in desired_calls}
         put_quotes  = {k: float(put_map.get(k, np.nan)) for k in desired_puts}
 
+        # Ex-dividend date — info dict, then infer from dividend history
+        ex_div_date = "N/A"
+        try:
+            ex_div_ts = info.get("exDividendDate")
+            if ex_div_ts:
+                ex_div_date = datetime.utcfromtimestamp(int(ex_div_ts)).strftime("%Y-%m-%d")
+        except Exception:
+            pass
+        if ex_div_date == "N/A":
+            try:
+                divs = t_price.dividends
+                if divs is not None and not divs.empty:
+                    last_ex = pd.Timestamp(divs.index[-1]).tz_localize(None)
+                    today = pd.Timestamp.today().normalize()
+                    if last_ex >= today:
+                        ex_div_date = last_ex.strftime("%Y-%m-%d")
+                    else:
+                        # Estimate next by adding median interval between past dividends
+                        if len(divs) >= 2:
+                            intervals = divs.index.tz_localize(None).to_series().diff().dropna()
+                            med_days = int(intervals.median().days)
+                        else:
+                            med_days = 91
+                        next_ex = last_ex + pd.Timedelta(days=med_days)
+                        ex_div_date = f"~{next_ex.strftime('%Y-%m-%d')}"
+            except Exception:
+                pass
+
         # Build
         df = compute_rows(base_ticker, price, div_pct, put_quotes, call_quotes, desired_puts, desired_calls)
 
-        # Add Expiry column AFTER "Curr Price$" (Ticker, Curr Price$, Expiry, ...)
-        df.insert(2, "Expiry", chosen)
+        # Add separate expiry columns
+        df.insert(2, "Call Expiry", chosen_call)
+        df.insert(2, "Put Expiry", chosen_put)
 
         # Rename columns to compact labels
         rename_map = {
@@ -353,7 +397,7 @@ if run_btn:
 
         # Reorder columns with compact headers
         compact_order = [
-            "Ticker", "Curr Price$", "Expiry",
+            "Ticker", "Curr Price$", "Put Expiry", "Call Expiry",
             "Put", "Put$", "Call", "Call$",
             "Net Prem$", "Net Prem%", "Floor%", "Eff. Floor%",
             "Up%", "MaxProfit", "Div%", "MaxProfit+Div", "Up+Div%", "Band%",
@@ -368,7 +412,9 @@ if run_btn:
             "price": price,
             "div_pct": div_pct,
             "long_name": long_name,
-            "chosen": chosen,
+            "chosen_put": chosen_put,
+            "chosen_call": chosen_call,
+            "ex_div_date": ex_div_date,
         }
         st.session_state["df"] = df
     except Exception as e:
@@ -378,21 +424,30 @@ if run_btn:
 if "results" in st.session_state:
     meta, df = st.session_state["results"], st.session_state["df"]
 
-    # Header w/ horizon
-    try:
-        expiry_date = datetime.strptime(meta["chosen"], "%Y-%m-%d").date()
-        delta = relativedelta(expiry_date, datetime.today().date())
-        months_out = delta.years * 12 + delta.months
-        horizon_str = f"{months_out} months out" if months_out > 0 else f"{(expiry_date - datetime.today().date()).days} days out"
-    except Exception:
-        horizon_str = ""
-    st.markdown(f"**{meta['long_name']}** | Expiry: **{meta['chosen']}**" + (f" ({horizon_str})" if horizon_str else ""))
+    # Header
+    def horizon(date_str):
+        try:
+            d = datetime.strptime(date_str, "%Y-%m-%d").date()
+            delta = relativedelta(d, datetime.today().date())
+            m = delta.years * 12 + delta.months
+            return f"{m} mo" if m > 0 else f"{(d - datetime.today().date()).days}d"
+        except Exception:
+            return ""
+
+    put_h  = horizon(meta["chosen_put"])
+    call_h = horizon(meta["chosen_call"])
+    st.markdown(
+        f"**{meta['long_name']}** | "
+        f"Put Expiry: **{meta['chosen_put']}**" + (f" ({put_h})" if put_h else "") +
+        f"  |  Call Expiry: **{meta['chosen_call']}**" + (f" ({call_h})" if call_h else "")
+    )
 
     # Metrics
-    m1, m2, m3 = st.columns(3)
+    m1, m2, m3, m4 = st.columns(4)
     m1.metric("Pricing Symbol", meta["price_symbol"])
     m2.metric("Last Price", f"${meta['price']:,.2f}")
     m3.metric("Dividend % (TTM)", f"{meta['div_pct']:.2f}%")
+    m4.metric("Ex-Dividend Date", meta["ex_div_date"])
 
     # ===== Tabs with Material Icons
     tab_results, tab_best = st.tabs([":material/table_chart: Results", ":material/emoji_events: Best Setups"])
@@ -403,7 +458,7 @@ if "results" in st.session_state:
         st.download_button(
             "Download CSV",
             data=csv,
-            file_name=f"{meta['base_ticker']}_collars_{meta['chosen']}.csv",
+            file_name=f"{meta['base_ticker']}_collars_{meta['chosen_put']}_{meta['chosen_call']}.csv",
             mime="text/csv"
         )
 
@@ -429,7 +484,7 @@ if "results" in st.session_state:
 
         with f3:
             # min_up_div = st.number_input("Min Up+Div%", value=10.0, step=0.5)
-            min_eff_profit = st.number_input("Max Profit", value=7.0, step=0.25)
+            min_eff_profit = st.number_input("Minimum MaxProfit", value=7.0, step=0.25)
 
         with f4:
             top_n = st.number_input("Top N", min_value=1, max_value=10, value=3, step=1)
